@@ -10,6 +10,7 @@ import (
 )
 
 const (
+	HTTP_PROTOCOL                     = "HTTP/1.1"
 	HTTP_STATUS_OK                    = "HTTP/1.1 200 OK\r\n\r\n"
 	HTTP_STATUS_NOT_FOUND             = "HTTP/1.1 404 Not Found\r\n\r\n"
 	HTTP_STATUS_CREATED               = "HTTP/1.1 201 Created\r\n\r\n"
@@ -59,9 +60,11 @@ func main() {
 	// You can use print statements as follows for debugging, they'll be visible when running tests.
 	fmt.Println("Logs from your program will appear here!")
 
+	// get static site directory from flag
 	flags := GetFlags()
 	fileDir := flags.ServerDirectory
 
+	// set up listener
 	l, err := net.Listen("tcp", "0.0.0.0:4221")
 	if err != nil {
 		fmt.Println("Failed to bind to port 4221")
@@ -70,13 +73,14 @@ func main() {
 
 	defer l.Close()
 
+	// accept connections and pass to handler
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			fmt.Println("Error accepting connection: ", err.Error())
 			os.Exit(1)
 		}
-
+		// handle requests in go routin
 		go handleRequest(conn, fileDir)
 	}
 }
@@ -95,22 +99,9 @@ func handleRequest(conn net.Conn, fileDir string) {
 
 		var resp Response       // holds response data
 		var req Request         // holds request data
-		var fullResponse string // full response to be sent to client
-		fmt.Println(string(data))
+		var fullResponse string // full response to send to client
 
-		/*
-			splitRequest := strings.Split(string(data[:numBytes]), "\r\n")
-			request := strings.Split(splitRequest[0], " ")
-			fmt.Println(request)
-			fmt.Println(len(request))
-
-			if len(request) > 3 {
-				fullResponse = HTTP_STATUS_NOT_FOUND
-				conn.Write([]byte(fullResponse))
-				return
-			}
-		*/
-
+		// parse request and store in Request truct
 		parseRequest(string(data[:numBytes]), &req)
 
 		// Test if site root directory or something else
@@ -126,12 +117,12 @@ func handleRequest(conn net.Conn, fileDir string) {
 			}
 			switch splitPath[0] {
 			case "echo":
-				resp.Protocol = "HTTP/1.1"
+				resp.Protocol = HTTP_PROTOCOL
 				resp.Status = "200 OK"
 				resp.ContentType = "text/plain"
 				resp.Body = splitPath[1]
 			case "user-agent":
-				resp.Protocol = "HTTP/1.1"
+				resp.Protocol = HTTP_PROTOCOL
 				resp.Status = "200 OK"
 				resp.ContentType = "text/plain"
 				resp.Body = strings.Split(req.UserAgent, " ")[1]
@@ -139,18 +130,17 @@ func handleRequest(conn net.Conn, fileDir string) {
 				fileName := splitPath[1]
 				if req.Method == GET {
 					respBody, err := os.ReadFile(fileDir + "/" + fileName)
-					//fmt.Println(string(respBody))
 					if err != nil {
 						fullResponse = HTTP_STATUS_NOT_FOUND
 						conn.Write([]byte(fullResponse))
 						return
 					}
-					resp.Protocol = "HTTP/1.1"
+					resp.Protocol = HTTP_PROTOCOL
 					resp.Status = "200 OK"
 					resp.ContentType = "application/octet-stream"
 					resp.Body = string(respBody)
 				} else if req.Method == POST {
-					err := os.WriteFile(fileDir+"/"+fileName, []byte(req.Body), 664)
+					err := os.WriteFile(fileDir+"/"+fileName, []byte(req.Body), 0664)
 					if err != nil {
 						fullResponse = HTTP_STATUS_INTERNAL_SERVER_ERROR
 						conn.Write([]byte(fullResponse))
@@ -172,18 +162,15 @@ func handleRequest(conn net.Conn, fileDir string) {
 		}
 		// send response to client
 		fullResponse = createResponse(resp)
-		fmt.Println(fullResponse)
 		conn.Write([]byte(fullResponse))
 	}
-
 }
 
 // parses full request and
 func parseRequest(fullReq string, r *Request) {
 	// split full request on "\r\n"
 	splitRequest := strings.Split(fullReq, "\r\n")
-	fmt.Println(splitRequest)
-	fmt.Println(len(splitRequest))
+
 	// grab the request itself
 	req := strings.Split(splitRequest[0], " ")
 
