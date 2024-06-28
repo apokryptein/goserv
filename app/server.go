@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -10,7 +13,6 @@ import (
 )
 
 const (
-	HTTP_PROTOCOL                     = "HTTP/1.1"
 	HTTP_STATUS_OK                    = "HTTP/1.1 200 OK\r\n\r\n"
 	HTTP_STATUS_NOT_FOUND             = "HTTP/1.1 404 Not Found\r\n\r\n"
 	HTTP_STATUS_CREATED               = "HTTP/1.1 201 Created\r\n\r\n"
@@ -20,12 +22,11 @@ const (
 )
 
 type Request struct {
-	Method    string
-	Protocol  string
-	Path      string
-	Host      string
-	UserAgent string
-	Body      string
+	Method   string
+	Protocol string
+	Path     string
+	Body     string
+	Headers  map[string]string
 }
 
 type Response struct {
@@ -33,6 +34,7 @@ type Response struct {
 	Status      string
 	ContentType string
 	Body        string
+	Encoding    string
 }
 
 type Flags struct {
@@ -41,11 +43,10 @@ type Flags struct {
 
 // Flag parsing function
 func GetFlags() Flags {
-
 	// define flags
 	filePath := flag.String("directory", "", "Static site directory")
 
-	// parse flage
+	// parse flags
 	flag.Parse()
 
 	// put flags into Flags struct
@@ -57,14 +58,10 @@ func GetFlags() Flags {
 }
 
 func main() {
-	// You can use print statements as follows for debugging, they'll be visible when running tests.
-	fmt.Println("Logs from your program will appear here!")
-
-	// get static site directory from flag
+	// get flags
 	flags := GetFlags()
 	fileDir := flags.ServerDirectory
 
-	// set up listener
 	l, err := net.Listen("tcp", "0.0.0.0:4221")
 	if err != nil {
 		fmt.Println("Failed to bind to port 4221")
@@ -73,14 +70,13 @@ func main() {
 
 	defer l.Close()
 
-	// accept connections and pass to handler
 	for {
 		conn, err := l.Accept()
 		if err != nil {
 			fmt.Println("Error accepting connection: ", err.Error())
 			os.Exit(1)
 		}
-		// handle requests in go routin
+
 		go handleRequest(conn, fileDir)
 	}
 }
@@ -89,43 +85,48 @@ func handleRequest(conn net.Conn, fileDir string) {
 	defer conn.Close()
 
 	for {
-
 		data := make([]byte, 1024)
 		numBytes, err := conn.Read(data)
 		if err != nil {
+			if err == io.EOF {
+				fmt.Println("Connection closed by client")
+				return
+			}
 			log.Fatal(err)
-			os.Exit(1)
 		}
 
 		var resp Response       // holds response data
 		var req Request         // holds request data
-		var fullResponse string // full response to send to client
+		var fullResponse string // full response to be sent to client
 
-		// parse request and store in Request truct
 		parseRequest(string(data[:numBytes]), &req)
 
 		// Test if site root directory or something else
 		if req.Path == "/" {
 			fullResponse = HTTP_STATUS_OK
 			conn.Write([]byte(fullResponse))
-			return
 		} else {
 			splitPath := parseRequestPath(req.Path)[1:]
 			if len(splitPath) > 2 {
-				conn.Write([]byte("HTTP/1.1 Invalid Request\r\n\r\n"))
-				break
+				conn.Write([]byte("HTTP/1.1 400 Bad Request\r\n\r\n"))
+				return
 			}
 			switch splitPath[0] {
 			case "echo":
-				resp.Protocol = HTTP_PROTOCOL
-				resp.Status = "200 OK"
-				resp.ContentType = "text/plain"
+				encoding, ok := req.Headers["Accept-Encoding"]
+				if ok && strings.Contains(encoding, "gzip") {
+					resp.Encoding = "gzip"
+				}
+
 				resp.Body = splitPath[1]
-			case "user-agent":
-				resp.Protocol = HTTP_PROTOCOL
+				resp.Protocol = "HTTP/1.1"
 				resp.Status = "200 OK"
 				resp.ContentType = "text/plain"
-				resp.Body = strings.Split(req.UserAgent, " ")[1]
+			case "user-agent":
+				resp.Protocol = "HTTP/1.1"
+				resp.Status = "200 OK"
+				resp.ContentType = "text/plain"
+				resp.Body = req.Headers["User-Agent"]
 			case "files":
 				fileName := splitPath[1]
 				if req.Method == GET {
@@ -135,7 +136,7 @@ func handleRequest(conn net.Conn, fileDir string) {
 						conn.Write([]byte(fullResponse))
 						return
 					}
-					resp.Protocol = HTTP_PROTOCOL
+					resp.Protocol = "HTTP/1.1"
 					resp.Status = "200 OK"
 					resp.ContentType = "application/octet-stream"
 					resp.Body = string(respBody)
@@ -160,6 +161,7 @@ func handleRequest(conn net.Conn, fileDir string) {
 				return
 			}
 		}
+
 		// send response to client
 		fullResponse = createResponse(resp)
 		conn.Write([]byte(fullResponse))
@@ -174,25 +176,59 @@ func parseRequest(fullReq string, r *Request) {
 	// grab the request itself
 	req := strings.Split(splitRequest[0], " ")
 
-	// put the rest into headers array
-	headers := splitRequest[1:]
+	// map to hold header values
+	headers := make(map[string]string)
 
-	// assign to struct
+	// grab the body
+	body := splitRequest[len(splitRequest)-1]
+
+	// parse headers into map[string]string
+	for _, header := range splitRequest[1 : len(splitRequest[1:])-1] {
+		line := strings.Split(header, ": ")
+		headers[line[0]] = line[1]
+	}
+
+	// assign parsed values to Response struct
 	r.Method = req[0]
 	r.Protocol = req[2]
 	r.Path = req[1]
-	r.Host = headers[0]
-	r.UserAgent = headers[1]
-	r.Body = strings.Replace(headers[len(headers)-1], "\x00", "", -1)
+	r.Body = strings.Replace(body, "\x00", "", -1)
+	r.Headers = headers
 }
 
-// splits path on "/""
+// split path on "/""
 func parseRequestPath(request string) []string {
 	return strings.Split(request, "/")
 }
 
-// constructs response
+// construct response
 func createResponse(r Response) string {
+	if r.Encoding == "gzip" {
+		body, err := gzipBody(r.Body)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		responseString := fmt.Sprintf("%s %s\r\nContent-Encoding: %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", r.Protocol, r.Status, r.Encoding, r.ContentType, len(body), body)
+		return responseString
+	}
 	responseString := fmt.Sprintf("%s %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", r.Protocol, r.Status, r.ContentType, len(r.Body), r.Body)
 	return responseString
+}
+
+func gzipBody(body string) (string, error) {
+	var bodyBuffer bytes.Buffer
+	zipper := gzip.NewWriter(&bodyBuffer)
+
+	_, err := zipper.Write([]byte(body))
+	if err != nil {
+		return "", err
+	}
+
+	err = zipper.Close()
+	if err != nil {
+		return "", err
+	}
+
+	return bodyBuffer.String(), nil
 }
